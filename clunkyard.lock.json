@@ -1,0 +1,29 @@
+{
+  "version": "v2.0.0-kit.1",
+  "sdkVersion": "2.0.0",
+  "language": "clojure",
+  "portable": false,
+  "engine": {
+    "file": "clunkyard-engine-v2.0.0-kit.1.tar.gz",
+    "url": "https://github.com/clunkyard/game-kit/releases/download/v2.0.0-kit.1/clunkyard-engine-v2.0.0-kit.1.tar.gz",
+    "bytes": 7071301,
+    "sha256": "0b9cfa6958a952c32388602821ec4275e61400255f91b212f9c2a9220f8a0d86",
+    "expandedBytes": 33794538
+  },
+  "sdk": {
+    "file": "clunkyard-sdk-clojure-linux-x64-v2.0.0-kit.1.tar.gz",
+    "url": "https://github.com/clunkyard/game-kit/releases/download/v2.0.0-kit.1/clunkyard-sdk-clojure-linux-x64-v2.0.0-kit.1.tar.gz",
+    "bytes": 754671,
+    "sha256": "b785e12bc62707fd1efc6d86594e251ed27329001ff0593a51af09d01b3b880b",
+    "expandedBytes": 3895344
+  },
+  "rebuildBindings": [
+    "java",
+    "clojure"
+  ],
+  "tools": [
+    "node",
+    "make",
+    "java"
+  ]
+}
