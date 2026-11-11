@@ -4,7 +4,7 @@ Edit `bot.clj`, build, play a real match and read its replay. This is the same s
 
 ## Start locally
 
-Install Node 20+ and your existing language tools: `java`. Native SDK assets require Linux x86-64 and glibc 2.39+ (Ubuntu 24.04+ or WSL2 Ubuntu 24.04+). Other native platforms are not yet qualified.
+Install Node 20+ and your existing language tools: `java`, `javac`. Native SDK assets require Linux x86-64 and glibc 2.39+ (Ubuntu 24.04+ or WSL2 Ubuntu 24.04+). Other native platforms are not yet qualified.
 
 ```sh
 git clone https://github.com/clunkyard/starter-clojure.git
@@ -16,6 +16,8 @@ make replay
 ```
 
 Without Make, use `node clunkyard.cjs build`, `match` and `replay` (also available through `npm run`). The first build downloads the checksum-pinned local engine (6.7MiB) and only this language's SDK (0.72MiB). It installs into ignored `.clunkyard/`; it does not download a toolchain or require Docker, an account, root access or the all-language builder. An existing matching installation can be selected with `CLUNKYARD_SDK`. Compiler-specific bindings rebuild with your installed compiler.
+
+Install Clojure as well as JDK 22+. The kit uses /usr/share/java/clojure.jar, CLOJURE_CLASSPATH, CLOJURE_JAR, or the Clojure CLI classpath (clojure -Spath).
 
 Read the [language binding guide](https://clunkyard.com/sdk/clojure) for compiler versions, the official language guide and dependencies. Run `node clunkyard.cjs doctor` to check available tools. Your normal language commands remain available; `make` provides a repeatable SDK-aware build. Use JDK 22 or later for the Foreign Function and Memory API.
 
