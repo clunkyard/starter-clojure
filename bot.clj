@@ -45,7 +45,17 @@
 (defn steer [angles towards current]
   (.clamp ^clunkyard.Angles angles (/ (.angleDiff ^clunkyard.Angles angles (double towards) (double current)) 45)))
 
-
+(defn calibration-work
+  "The calibration kernel, xorshift-sqrt v1: work rounds of a 64-bit xorshift
+  and a square-root sum."
+  ^long [^long work ^long tick]
+  (loop [i 0, x (bit-xor 88172645463325252 tick), sum 0.0]
+    (if (< i work)
+      (let [x (bit-xor x (bit-shift-left x 13))
+            x (bit-xor x (unsigned-bit-shift-right x 7))
+            x (bit-xor x (bit-shift-left x 17))]
+        (recur (unchecked-inc i) x (+ sum (Math/sqrt (unsigned-bit-shift-right x 11)))))
+      (mod (+ (long (Math/floor sum)) (unsigned-bit-shift-right x 40)) 1000000))))
 
 
 (defn turn [^Robot bot]
@@ -84,7 +94,8 @@
       (when (and zone (< (.orElse (.margin ^clunkyard.Zone zone position) 1e9) 60))
         (let [climb (if (= (.shape ^clunkyard.Zone zone) Shape/SPHERE) (.elevationTo angles position (.center ^clunkyard.Zone zone)) 0.0)]
           (.set drive 0.8 (.clamp angles (/ (.angleDiff angles (.bearingTo angles position (.center ^clunkyard.Zone zone)) (.heading self)) 30)) (.clamp angles (/ (- climb (.pitch self)) 30))))))
-    ))
+    (let [work (long (.orElse (.number (.raw bot) "state.calibration.work") 0.0))]
+      (when (pos? work) (.set status "WORK" (double (calibration-work work (.tick (.clock bot)))))))))
 
 (let [robot (atom nil), bot (proxy [Robot] [] (onTurn [] (turn @robot)))]
   (reset! robot bot)
