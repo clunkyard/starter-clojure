@@ -1,4 +1,9 @@
 ;; A robot on the arena's shared Java core binding.
+;; Bearing is earned: a scan contact's bearing is off by up to its
+;; bearingError (degrees, a fixed share of the arc), so a wide beam finds a
+;; robot and a narrow one aims at it. The robot narrows the beam, holds it
+;; on the target and aims along a line fitted through its recent sightings.
+;; Contacts within 120 units are exact.
 ;; Clunkyard robot API 2.0.0: one core under every language, the same
 ;; answers everywhere. Facts (a call shows its arguments):
 ;; match: mode ruleset control robots is_3d tick_rate max_ticks
@@ -42,55 +47,110 @@
 ;; your language cases them its own way. Angles are degrees from the +x
 ;; axis; pitch is positive up.
 ;; Manual: https://clunkyard.com/manual#sdk
-(import '[clunkyard Robot Clunkyard Control Drive Shape Source])
+(import '[clunkyard Robot Clunkyard Control Drive Shape Source Vec3])
+
+(def search-arc 40.0)  ; degrees: sweeps the circle in half a second
+(def hold-width 60.0)  ; units across at the target: it stays in the beam from tick to tick
+(def min-arc 6.0)      ; degrees: the narrowest the beam holds
+(def window 12)        ; ticks of sightings the aim averages
+(def sightings 8)      ; narrow sightings in the window before a shot
+(def look-every 40)    ; ticks between looks around the target, for a nearer robot
+(def reacquire 10)     ; ticks to look again where a lost target was
 
 (defn steer [angles towards current]
   (.clamp ^clunkyard.Angles angles (/ (.angleDiff ^clunkyard.Angles angles (double towards) (double current)) 45)))
 
-;; Dodges taken, and the tick the current one ends.
-(def dodging (atom {:dodges 0 :end 0}))
+;; Dodges taken, the tick the current one ends, and the last target's slot
+;; (for looking again where it was lost).
+(def dodging (atom {:dodges 0 :end 0 :slot 0}))
+
+;; A straight line through the narrowest of the last `window` ticks' sightings:
+;; where the robot is now and how fast it moves. Each sighting is off by its
+;; bearingError; the line averages that out.
+(defn fit [^Robot bot slot tick]
+  (let [recent (filter #(> (.tick ^clunkyard.Sighting %) (- tick window)) (.history (.tracker bot) slot))
+        best (when (seq recent) (apply min (map #(.bearingError ^clunkyard.Sighting %) recent)))
+        seen (when best (filter #(<= (.bearingError ^clunkyard.Sighting %) (* 1.5 best)) recent)) ; the narrow ones
+        n (count seen)]
+    (when (>= n 2)
+      (let [ticks (map #(.tick ^clunkyard.Sighting %) seen)
+            t0 (/ (reduce + ticks) (double n))
+            spread (reduce + (map #(Math/pow (- % t0) 2) ticks))
+            ;; One axis: the line's position now and its slope per tick.
+            axis (fn [of]
+                   (let [ps (map #(of (.position ^clunkyard.Sighting %)) seen)
+                         mean (/ (reduce + ps) (double n))
+                         slope (/ (reduce + (map (fn [t p] (* (- t t0) (- p mean))) ticks ps)) spread)]
+                     [(+ mean (* slope (- tick t0))) (* slope (.tickRate (.match bot)))]))
+            [x y z] [(axis #(.x ^Vec3 %)) (axis #(.y ^Vec3 %)) (axis #(.z ^Vec3 %))]]
+        {:position (Vec3. (first x) (first y) (first z))
+         :velocity (Vec3. (second x) (second y) (second z))
+         :count n}))))
 
 (defn turn [^Robot bot]
   (let [self (.me bot), position (.position self), angles (.angles bot), gun (.gun bot), scanner (.scanner bot), drive (.drive bot), status (.status bot)
+        tick (.tick (.clock bot)), slot (:slot @dodging)
         target (.orElse (.nearest (.sensors bot)) nil), cue (.orElse (.cue (.tracker bot)) nil)
+        last-seen (when-not (zero? slot) (let [seen (.lastSeen (.tracker bot) slot)] (when (.isPresent seen) (.getAsInt seen))))
         free (and (.is3d (.match bot)) (zero? (.z (.gravity (.arena bot)))))]
     (.forces drive (Drive/brake 0.2))
     (cond
       target
-      (let [throttle (cond (> (.range ^clunkyard.Contact target) 350) 0.7 (< (.range ^clunkyard.Contact target) 200) -0.4 :else 0.2)
-            power (.powerForFlightTime gun (.range ^clunkyard.Contact target) 1.0)
-            ;; .lead is the intercept if the target holds course.
-            aim (.orElse (.lead gun target power) nil)
-            heading (if aim (.heading ^clunkyard.Solution aim) (.bearing ^clunkyard.Contact target))
-            pitch (if aim (.pitch ^clunkyard.Solution aim) (.elevation ^clunkyard.Contact target))
+      (let [^clunkyard.Contact target target
+            range (.range target)
+            throttle (cond (> range 350) 0.7 (< range 200) -0.4 :else 0.2)
+            ;; Halve the beam each tick until it is hold-width across at the target:
+            ;; narrow enough for a precise bearing, wide enough to keep it in.
+            hold (max min-arc (Math/toDegrees (* 2 (Math/atan2 (/ hold-width 2) range))))
+            ;; In a crowd a narrow beam sees one robot. Every look-every ticks,
+            ;; widen it for a tick: a nearer robot it finds becomes the target.
+            arc (if (zero? (mod tick look-every)) search-arc (max hold (min search-arc (/ (.arc (.last scanner)) 2))))
+            power (.powerForFlightTime gun range 1.0)
+            ;; An exact contact: .lead is the intercept if the target holds course.
+            ;; A noisy one: lead the fitted line, and fire only once it rests on enough sightings.
+            line (when (pos? (.bearingError target)) (fit bot (.slot target) tick))
+            ready (or (zero? (.bearingError target)) (boolean (and line (>= (:count line) sightings))))
+            aim (if (pos? (.bearingError target))
+                  (when line (.orElse (.leadPoint gun (:position line) (:velocity line) power) nil))
+                  (.orElse (.lead gun target power) nil))
+            heading (if aim (.heading ^clunkyard.Solution aim) (.bearing target))
+            pitch (if aim (.pitch ^clunkyard.Solution aim) (.elevation target))
             now (.aimNow gun)]
-        (.set drive throttle (steer angles (.bearing ^clunkyard.Contact target) (.heading self)) (steer angles (.elevation ^clunkyard.Contact target) (.pitch self)))
-        (.set scanner (.bearing ^clunkyard.Contact target) 20.0 (.elevation ^clunkyard.Contact target))
+        (swap! dodging assoc :slot (.slot target))
+        (.set drive throttle (steer angles (.bearing target) (.heading self)) (steer angles (.elevation target) (.pitch self)))
+        (.set scanner (.bearing target) arc (.elevation target))
         (.aim gun heading pitch)
-        (when (and (< (Math/abs (.angleDiff angles heading (.heading now))) 3) (< (Math/abs (- pitch (.pitch now))) 3) (.canFire gun power 10.0)) (.fire gun power))
-        (.set status "TRACK" (.range ^clunkyard.Contact target)))
+        (when (and ready (< (Math/abs (.angleDiff angles heading (.heading now))) 3) (< (Math/abs (- pitch (.pitch now))) 3) (.canFire gun power 10.0)) (.fire gun power))
+        (.set status (if ready "TRACK" "NARROW") range))
+      ;; Lost it: look again where it was last seen, widening the beam, before searching.
+      (and last-seen (<= (- tick last-seen) reacquire))
+      (let [where (.orElse (.position (.tracker bot) slot) position)
+            bearing (.bearingTo angles position where)
+            elevation (if free (.elevationTo angles position where) 0.0)]
+        (.set drive 0.5 (steer angles bearing (.heading self)) (steer angles elevation (.pitch self)))
+        (.set scanner bearing (min search-arc (* 2 (.arc (.last scanner)))) elevation)
+        (.set status "REACQUIRE"))
       cue
       (let [^clunkyard.Cue cue cue, bearing (.bearingTo angles position (.position cue)), distance (.distance angles position (.position cue))
-            elevation (if free (.elevationTo angles position (.position cue)) 0.0), error (min (.bearingError cue) 30.0), tick (.tick (.clock bot))
+            elevation (if free (.elevationTo angles position (.position cue)) 0.0), error (min (.bearingError cue) 30.0)
             across (* (/ (- (mod tick 5) 2) 2.0) error), up (if free (* (/ (- (mod (quot tick 5) 3) 1) 2.0) error) 0.0)]
         (.set drive 0.7 (steer angles bearing (.heading self)) (steer angles elevation (.pitch self)))
         (.set scanner (+ bearing across) (.arcForReach scanner (+ distance 100)) (+ elevation up))
         (.set status "CUE" distance))
       :else
       (do (.set drive 0.5 0.33 (steer angles 0.0 (.pitch self)))
-          (.set scanner (.normalize angles (+ (.heading (.last scanner)) 36)) 40.0 (if free (* (- (mod (quot (.tick (.clock bot)) 10) 3) 1) 35.0) 0.0))
+          (.set scanner (.normalize angles (+ (.heading (.last scanner)) 36)) search-arc (if free (* (- (mod (quot tick 10) 3) 1) 35.0) 0.0))
           (.set status "SEARCH")))
     ;; A simple dodge: vary it, or predict the shooter.
-    (let [tick (.tick (.clock bot))]
-      (when (and (>= tick (:end @dodging)) (some #(= Source/MUZZLE (.source ^clunkyard.Contact %)) (.cues (.sensors bot))))
-        (swap! dodging #(-> % (update :dodges inc) (assoc :end (+ tick 10)))))
-      (when (< tick (:end @dodging))
-        ;; Off the line of fire: left, then right next time (turn is positive left, strafe positive right).
-        (let [dodges (:dodges @dodging), left (odd? dodges)]
-          (if (= (.control (.match bot)) Control/FORCES)
-            (do (.set drive (Drive/throttle 0.5)) (.forces drive (Drive/strafe (if left -1.0 1.0))))
-            (.set drive 1.0 (if left 1.0 -1.0)))
-          (.set status (if left "dodge:left" "dodge:right") (double dodges)))))
+    (when (and (>= tick (:end @dodging)) (some #(= Source/MUZZLE (.source ^clunkyard.Contact %)) (.cues (.sensors bot))))
+      (swap! dodging #(-> % (update :dodges inc) (assoc :end (+ tick 10)))))
+    (when (< tick (:end @dodging))
+      ;; Off the line of fire: left, then right next time (turn is positive left, strafe positive right).
+      (let [dodges (:dodges @dodging), left (odd? dodges)]
+        (if (= (.control (.match bot)) Control/FORCES)
+          (do (.set drive (Drive/throttle 0.5)) (.forces drive (Drive/strafe (if left -1.0 1.0))))
+          (.set drive 1.0 (if left 1.0 -1.0)))
+        (.set status (if left "dodge:left" "dodge:right") (double dodges))))
     (when (< (.charge (.battery bot)) (/ (.capacity (.battery bot)) 4)) (.set drive (Drive/throttle (* (.orElse (.get drive "throttle") 0.0) 0.5))))
     (let [storm (.orElse (.storm (.nav bot)) nil), zone (.orElse (.zone (.nav bot)) nil)]
       (when (and storm (> (.orElse (.margin ^clunkyard.Storm storm position) -1e9) -60))
