@@ -6,7 +6,8 @@
 ;; clock: tick seconds remaining_ticks
 ;; arena: size gravity terrain_kind ground_height(x y)
 ;; me: health position velocity heading pitch roll angular_velocity
-;;   attitude grounded altitude applied
+;;   attitude grounded altitude applied hull_mounts to_mount(heading pitch)
+;;   from_mount(heading pitch) mount_toward(point)
 ;; battery: charge capacity regen sustainable_drive compute
 ;;   drive_cost(fraction)
 ;; drive: hover_lift
@@ -28,7 +29,8 @@
 ;; score: me best armour
 ;; angles: normalize(degrees) angle_diff(target current)
 ;;   bearing_to(from to) elevation_to(from to) direction(heading pitch)
-;;   distance(a b) clamp(value low high)
+;;   distance(a b) to_chassis(heading pitch attitude)
+;;   from_chassis(heading pitch attitude) clamp(value low high)
 ;; raw: number(path) text(path) has(path) flag(path) count(path) line()
 ;; Controls: drive.set(throttle turn pitch_turn)
 ;;   drive.forces(thrust strafe lift yaw_torque pitch_torque roll_torque brake)
@@ -40,13 +42,13 @@
 ;; your language cases them its own way. Angles are degrees from the +x
 ;; axis; pitch is positive up.
 ;; Manual: https://clunkyard.com/manual#sdk
-(import '[clunkyard Robot Clunkyard Drive Shape])
+(import '[clunkyard Robot Clunkyard Control Drive Shape Source])
 
 (defn steer [angles towards current]
   (.clamp ^clunkyard.Angles angles (/ (.angleDiff ^clunkyard.Angles angles (double towards) (double current)) 45)))
 
-
-
+;; Dodges taken, and the tick the current one ends.
+(def dodging (atom {:dodges 0 :end 0}))
 
 (defn turn [^Robot bot]
   (let [self (.me bot), position (.position self), angles (.angles bot), gun (.gun bot), scanner (.scanner bot), drive (.drive bot), status (.status bot)
@@ -57,6 +59,7 @@
       target
       (let [throttle (cond (> (.range ^clunkyard.Contact target) 350) 0.7 (< (.range ^clunkyard.Contact target) 200) -0.4 :else 0.2)
             power (.powerForFlightTime gun (.range ^clunkyard.Contact target) 1.0)
+            ;; .lead is the intercept if the target holds course.
             aim (.orElse (.lead gun target power) nil)
             heading (if aim (.heading ^clunkyard.Solution aim) (.bearing ^clunkyard.Contact target))
             pitch (if aim (.pitch ^clunkyard.Solution aim) (.elevation ^clunkyard.Contact target))
@@ -77,6 +80,17 @@
       (do (.set drive 0.5 0.33 (steer angles 0.0 (.pitch self)))
           (.set scanner (.normalize angles (+ (.heading (.last scanner)) 36)) 40.0 (if free (* (- (mod (quot (.tick (.clock bot)) 10) 3) 1) 35.0) 0.0))
           (.set status "SEARCH")))
+    ;; A simple dodge: vary it, or predict the shooter.
+    (let [tick (.tick (.clock bot))]
+      (when (and (>= tick (:end @dodging)) (some #(= Source/MUZZLE (.source ^clunkyard.Contact %)) (.cues (.sensors bot))))
+        (swap! dodging #(-> % (update :dodges inc) (assoc :end (+ tick 10)))))
+      (when (< tick (:end @dodging))
+        ;; Off the line of fire: left, then right next time (turn is positive left, strafe positive right).
+        (let [dodges (:dodges @dodging), left (odd? dodges)]
+          (if (= (.control (.match bot)) Control/FORCES)
+            (do (.set drive (Drive/throttle 0.5)) (.forces drive (Drive/strafe (if left -1.0 1.0))))
+            (.set drive 1.0 (if left 1.0 -1.0)))
+          (.set status (if left "dodge:left" "dodge:right") (double dodges)))))
     (when (< (.charge (.battery bot)) (/ (.capacity (.battery bot)) 4)) (.set drive (Drive/throttle (* (.orElse (.get drive "throttle") 0.0) 0.5))))
     (let [storm (.orElse (.storm (.nav bot)) nil), zone (.orElse (.zone (.nav bot)) nil)]
       (when (and storm (> (.orElse (.margin ^clunkyard.Storm storm position) -1e9) -60))
